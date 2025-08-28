@@ -1,11 +1,9 @@
 {
-	"id": "sample-plugin",
-	"name": "Sample Plugin",
-	"version": "1.0.0",
-	"minAppVersion": "0.15.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"id": "search-in-newtab",
+	"name": "Search in new tab",
+	"version": "0.1.0",
+	"minAppVersion": "1.5.0",
+	"description": "Open Search in a pinned main tab and remember last search settings & sort.",
+	"author": "Yu + ChatGPT",
 	"isDesktopOnly": false
-}
+  }
