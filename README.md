@@ -1,10 +1,10 @@
 ## Search in new tab (Obsidian plugin)
 
-Open the core Search view in a pinned main tab and remember your last search settings and sort automatically.
+Open the core Search view in a pinned main tab and remember your last search settings and sort automatically. The last query is intentionally not saved.
 
 ### Features
 - **Pinned Search tab**: Opens Search in a new main-area tab and pins it, so navigating notes does not replace the tab.
-- **Remembers your settings**: Automatically saves and restores Search view state (query, toggles, sort, etc.).
+- **Remembers your settings**: Automatically saves and restores Search view state (toggles, sort, etc.). Query persistence can be toggled in settings; off by default.
 - **Auto-applies to new Search views**: When you open a new Search view, the saved state is applied.
 - **Commands and hotkeys**: Comes with convenient commands; assign a hotkey in Settings → Hotkeys.
 
@@ -18,7 +18,8 @@ Open the core Search view in a pinned main tab and remember your last search set
 Tip: Assign a hotkey for faster access in Obsidian → Settings → Hotkeys.
 
 ### Commands
-- **Open Search in pinned main tab (remember last settings)**: Opens a pinned Search tab and applies your last saved state.
+- **Open Search in pinned main tab (remember last settings)**: Opens a pinned Search tab and applies your last saved state (excluding the query).
+  - Note: If "Remember search query" is enabled in settings, the query will also be restored.
 - **Save current Search state now**: Manually snapshots the active Search view state.
 - **Clear saved Search state**: Forgets the saved state.
 
@@ -45,7 +46,7 @@ Tip: Assign a hotkey for faster access in Obsidian → Settings → Hotkeys.
 
 
 ### Privacy & data
-- The plugin stores your last Search view state locally in your vault at `.obsidian/plugins/search-in-newtab/data.json`.
+- The plugin stores your last Search view state locally in your vault at `.obsidian/plugins/search-in-newtab/data.json`. When "Remember search query" is disabled (default), the `query` is excluded.
 - No data leaves your device.
 
 ### Troubleshooting

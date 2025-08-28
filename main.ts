@@ -3,10 +3,13 @@ import { App, Plugin, PluginSettingTab, Setting, WorkspaceLeaf, Notice } from "o
 interface SearchPinnedRememberSettings {
   // Whatever the search view reports as its state; we keep it opaque
   lastSearchState: any | null;
+  // Whether to remember and restore the last query string
+  rememberQuery: boolean;
 }
 
 const DEFAULT_SETTINGS: SearchPinnedRememberSettings = {
   lastSearchState: null,
+  rememberQuery: false,
 };
 
 export default class SearchPinnedRememberPlugin extends Plugin {
@@ -35,7 +38,7 @@ export default class SearchPinnedRememberPlugin extends Plugin {
       callback: async () => {
         const st = this.getAnySearchState();
         if (st) {
-          this.settings.lastSearchState = st;
+          this.settings.lastSearchState = this.sanitizeSearchStateForPersistence(st);
           await this.saveSettings();
           new Notice("Search state saved.");
         } else {
@@ -85,7 +88,7 @@ export default class SearchPinnedRememberPlugin extends Plugin {
   private snapshotSearchState = async () => {
     const st = this.getAnySearchState();
     if (st) {
-      this.settings.lastSearchState = st;
+      this.settings.lastSearchState = this.sanitizeSearchStateForPersistence(st);
       await this.saveSettings();
     }
   };
@@ -108,6 +111,14 @@ export default class SearchPinnedRememberPlugin extends Plugin {
     return vs?.state ?? null;
   }
 
+  // Optionally remove the actual search query from the state before persisting
+  private sanitizeSearchStateForPersistence(state: any): any {
+    if (!state || typeof state !== "object") return state;
+    if (this.settings.rememberQuery) return state;
+    const { query, ...rest } = state;
+    return rest;
+  }
+
   private async openPinnedSearchWithLastState() {
     // Create a new main-area tab (“tab” target) and activate Search in it
     const leaf = this.app.workspace.getLeaf("tab");
@@ -116,7 +127,9 @@ export default class SearchPinnedRememberPlugin extends Plugin {
     const viewState = {
       type: "search",
       active: true,
-      state: this.settings.lastSearchState ?? { query: "" }, // empty query by default
+      state: this.settings.rememberQuery
+        ? (this.settings.lastSearchState ?? {})
+        : { ...(this.settings.lastSearchState ?? {}), query: "" },
     };
 
     await leaf.setViewState(viewState);
@@ -151,7 +164,9 @@ export default class SearchPinnedRememberPlugin extends Plugin {
           const current = leaf.getViewState();
           await leaf.setViewState({
             ...current,
-            state: this.settings.lastSearchState,
+            state: this.settings.rememberQuery
+              ? { ...this.settings.lastSearchState }
+              : { ...this.settings.lastSearchState, query: "" },
           });
         }
       } catch {}
@@ -180,11 +195,12 @@ export default class SearchPinnedRememberPlugin extends Plugin {
 
         const vs = leaf.getViewState();
         const currentState = vs?.state ?? null;
-        const currentStr = JSON.stringify(currentState);
+        const sanitizedState = this.sanitizeSearchStateForPersistence(currentState);
+        const currentStr = JSON.stringify(sanitizedState);
         const prevStr = this.leafLastStateStr.get(leaf);
         if (currentStr && currentStr !== prevStr) {
           this.leafLastStateStr.set(leaf, currentStr);
-          this.settings.lastSearchState = currentState;
+          this.settings.lastSearchState = sanitizedState;
           await this.saveSettings();
         }
       } catch {}
@@ -218,6 +234,18 @@ class SearchPinnedRememberSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     containerEl.createEl("h3", { text: "Search: Pinned & Remember" });
+
+    new Setting(containerEl)
+      .setName("Remember search query")
+      .setDesc("If enabled, the last search query will be saved and restored.")
+      .addToggle(toggle => {
+        toggle
+          .setValue(this.plugin.settings.rememberQuery)
+          .onChange(async (value) => {
+            this.plugin.settings.rememberQuery = value;
+            await this.plugin.saveSettings();
+          });
+      });
 
     new Setting(containerEl)
       .setName("Reset saved Search state")
