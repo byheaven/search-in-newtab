@@ -4,6 +4,6 @@
 	"version": "0.1.0",
 	"minAppVersion": "1.5.0",
 	"description": "Open Search in a pinned main tab and remember last search settings & sort.",
-	"author": "Yu + ChatGPT",
+	"author": "Yu + Cursor",
 	"isDesktopOnly": false
   }
