@@ -11,6 +11,8 @@ interface SearchPinnedRememberSettings {
   clearSidebarSearchOnStartup: boolean;
   // Whether to enable debug mode (show detailed console logs)
   debugMode: boolean;
+  // Whether to automatically pin search tabs when opening them in main area
+  autoPinSearchTab: boolean;
 }
 
 const DEFAULT_SETTINGS: SearchPinnedRememberSettings = {
@@ -19,6 +21,7 @@ const DEFAULT_SETTINGS: SearchPinnedRememberSettings = {
   openBookmarksInMainArea: true, // Default to true for better UX
   clearSidebarSearchOnStartup: false,
   debugMode: false, // Default to false for clean user experience
+  autoPinSearchTab: true, // Default to true for backward compatibility
 };
 
 export default class SearchPinnedRememberPlugin extends Plugin {
@@ -243,7 +246,9 @@ export default class SearchPinnedRememberPlugin extends Plugin {
     await leaf.setViewState(viewState);
 
     // Pin it so subsequent navigations don't replace the tab
-    leaf.setPinned(true);
+    if (this.settings.autoPinSearchTab) {
+      leaf.setPinned(true);
+    }
 
     // Reveal focus to the new Search tab
     this.app.workspace.revealLeaf(leaf);
@@ -791,10 +796,12 @@ export default class SearchPinnedRememberPlugin extends Plugin {
       
       console.log('🎯 Setting view state:', viewState);
       await leaf.setViewState(viewState);
-      
-      // Pin the tab
-      leaf.setPinned(true);
-      
+
+      // Pin the tab if auto-pin is enabled
+      if (this.settings.autoPinSearchTab) {
+        leaf.setPinned(true);
+      }
+
       // Reveal and focus the new tab
       this.app.workspace.revealLeaf(leaf);
       
@@ -908,10 +915,12 @@ export default class SearchPinnedRememberPlugin extends Plugin {
         active: true,
         state: finalSearchState
       });
-      
-      // Pin the tab
-      leaf.setPinned(true);
-      
+
+      // Pin the tab if auto-pin is enabled
+      if (this.settings.autoPinSearchTab) {
+        leaf.setPinned(true);
+      }
+
       // Focus the new tab
       this.app.workspace.revealLeaf(leaf);
       
@@ -997,6 +1006,18 @@ class SearchPinnedRememberSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.rememberQuery)
           .onChange(async (value) => {
             this.plugin.settings.rememberQuery = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Auto-pin search tabs")
+      .setDesc("Automatically pin search tabs when opening them in the main area. If disabled, tabs can be manually pinned later.")
+      .addToggle(toggle => {
+        toggle
+          .setValue(this.plugin.settings.autoPinSearchTab)
+          .onChange(async (value) => {
+            this.plugin.settings.autoPinSearchTab = value;
             await this.plugin.saveSettings();
           });
       });
