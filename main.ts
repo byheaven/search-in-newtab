@@ -107,30 +107,39 @@ export default class SearchPinnedRememberPlugin extends Plugin {
       this.app.workspace.on("active-leaf-change", this.handleActiveLeafChanges)
     );
 
-    // Initial check on plugin load
-    await this.handleLayoutChanges();
-
-    // 🎯 Set up selective View State monitoring (only when redirection is enabled)
-    if (this.settings.openBookmarksInMainArea) {
-      this.setupViewStateMonitoring();
-    }
-
-    // Set up command hooking for keyboard shortcuts if enabled
-    if (this.settings.openBookmarksInMainArea) {
-      this.setupCommandInterception();
-    }
-
     // 🎯 Set up startup cleanup to run after workspace is ready
     if (this.settings.clearSidebarSearchOnStartup) {
       this.setupStartupCleanup();
     }
 
-    // 🎯 Mark initial load as complete AFTER all setup is done - real user interactions can now trigger redirection
-    this.isInitialLoad = false;
-    this.initializationCompleteTime = Date.now();
-    this.debugLog('🚀 Plugin initial load complete - bookmark redirection now active');
-
+    // Add settings tab early
     this.addSettingTab(new SearchPinnedRememberSettingTab(this.app, this));
+
+    // 🚀 OPTIMIZATION: Defer heavy initialization to avoid blocking startup
+    this.app.workspace.onLayoutReady(() => {
+      // Defer heavy operations to let UI remain responsive
+      setTimeout(() => {
+        this.debugLog('🚀 Starting deferred plugin initialization');
+
+        // Initial check on plugin load (no await - let it run async)
+        this.handleLayoutChanges();
+
+        // 🎯 Set up selective View State monitoring (only when redirection is enabled)
+        if (this.settings.openBookmarksInMainArea) {
+          this.setupViewStateMonitoring();
+        }
+
+        // Set up command hooking for keyboard shortcuts if enabled
+        if (this.settings.openBookmarksInMainArea) {
+          this.setupCommandInterception();
+        }
+
+        // 🎯 Mark initial load as complete AFTER all setup is done
+        this.isInitialLoad = false;
+        this.initializationCompleteTime = Date.now();
+        this.debugLog('🚀 Plugin deferred initialization complete - bookmark redirection now active');
+      }, 100); // Small delay to let UI settle
+    });
   }
 
   onunload() {
@@ -308,35 +317,42 @@ export default class SearchPinnedRememberPlugin extends Plugin {
   private async processNewSearchLeaf(leaf: WorkspaceLeaf) {
     // Mark as processed immediately to avoid reprocessing
     this.processedLeaves.add(leaf);
-    
+
     // Record creation time for immunity period
     this.leafCreationTime.set(leaf, Date.now());
-    
+
     // 🎯 NEW: Skip redirection during initial plugin load or grace period
     if (this.isInInitializationGracePeriod()) {
       this.debugLog('📍 Skipping redirection during plugin initialization grace period');
-      // Continue with normal processing (apply settings, start monitoring)
+
+      // 🔧 FIX: If clearSidebarSearchOnStartup is enabled and this is a sidebar search,
+      // don't apply settings or start monitoring - it will be cleaned up shortly
+      if (this.settings.clearSidebarSearchOnStartup && !this.isInMainArea(leaf)) {
+        this.debugLog('🧹 Skipping sidebar search processing - will be cleaned up on startup');
+        return;
+      }
+      // Continue with normal processing (apply settings, start monitoring) for main area searches
     } else {
       // Normal redirection logic for real bookmark clicks (after grace period)
       // 🎯 Check if bookmark redirection is enabled AND this is a sidebar search
       if (this.settings.openBookmarksInMainArea && !this.isInMainArea(leaf, true)) {
         this.debugLog('📍 New sidebar search detected via event system - redirecting to main area');
-        
+
         // Use centralized redirection trigger with duplicate prevention
         this.triggerRedirection('Event system');
-        
+
         // Don't apply settings or start monitoring - the leaf will be closed soon
         return;
       } else if (!this.isInMainArea(leaf, false)) {
         this.debugLog('📍 Sidebar search detected but redirection disabled by setting');
       }
     }
-    
+
     // Apply saved settings if available (for both initial load and non-redirected leaves)
     if (this.settings.lastSearchState) {
       await this.applySettingsToNewLeaf(leaf);
     }
-    
+
     // Start monitoring for user changes (with immunity period)
     this.startIntelligentMonitoring(leaf);
   };
@@ -530,27 +546,38 @@ export default class SearchPinnedRememberPlugin extends Plugin {
   // Set up selective View State monitoring - only monitor leaves that could become search views
   setupViewStateMonitoring() {
     this.debugLog('👁️ Setting up selective View State monitoring');
-    
-    // Only monitor sidebar leaves (where search views might be created)
+
+    // 🚀 OPTIMIZATION: Batch process all leaves in one pass
+    const sidebarLeaves: WorkspaceLeaf[] = [];
     this.app.workspace.iterateAllLeaves(leaf => {
       // Only monitor leaves in sidebar areas
       if (!this.isInMainArea(leaf)) {
-        this.monitorLeafViewState(leaf);
+        sidebarLeaves.push(leaf);
       }
     });
-    
+
+    // Monitor sidebar leaves asynchronously to avoid blocking
+    sidebarLeaves.forEach(leaf => {
+      this.monitorLeafViewState(leaf);
+    });
+
+    this.debugLog(`👁️ Monitoring ${sidebarLeaves.length} sidebar leaves`);
+
     // Monitor new leaves when they are created in sidebar areas only
     this.registerEvent(
       this.app.workspace.on('layout-change', () => {
         // Clear cache first since layout changed
         this.clearLocationCache();
-        
-        this.app.workspace.iterateAllLeaves(leaf => {
-          // Only monitor new sidebar leaves that aren't already monitored
-          if (!this.isInMainArea(leaf) && !(leaf as any).__viewStateMonitored) {
-            this.monitorLeafViewState(leaf);
-          }
-        });
+
+        // 🚀 OPTIMIZATION: Defer leaf monitoring to avoid blocking layout changes
+        setTimeout(() => {
+          this.app.workspace.iterateAllLeaves(leaf => {
+            // Only monitor new sidebar leaves that aren't already monitored
+            if (!this.isInMainArea(leaf) && !(leaf as any).__viewStateMonitored) {
+              this.monitorLeafViewState(leaf);
+            }
+          });
+        }, 0);
       })
     );
   }
