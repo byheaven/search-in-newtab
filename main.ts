@@ -39,8 +39,10 @@ export default class SearchPinnedRememberPlugin extends Plugin {
   private initializationCompleteTime: number = 0;
   private lastRedirectionTriggerTime: number = 0;
   // Cache for leaf location detection to avoid repeated calculations
-  private leafLocationCache: WeakMap<WorkspaceLeaf, boolean> = new WeakMap();
-  // Removed complex API interception - using simple event-driven detection instead
+  private leafLocationCache: WeakMap<WorkspaceLeaf, { result: boolean; timestamp: number }> = new WeakMap();
+  private cacheValidityDuration = 5000; // 5 seconds cache validity
+  private pendingDomOperations: (() => void)[] = [];
+  private domOperationScheduled = false;
 
   // Unified logging system - only logs when debug mode is enabled
   private debugLog(message: string, ...args: any[]) {
@@ -262,36 +264,45 @@ export default class SearchPinnedRememberPlugin extends Plugin {
     // Reveal focus to the new Search tab
     this.app.workspace.revealLeaf(leaf);
 
-    // Optional: focus the search input after render
-    window.setTimeout(() => {
+    // Optional: focus the search input after render - defer to avoid forced reflow
+    this.scheduleDomOperation(() => {
       try {
         const input = leaf.view?.containerEl?.querySelector<HTMLInputElement>("input[type='search'], .workspace-leaf-content input");
         input?.focus();
       } catch {}
-    }, 50);
+    });
   }
 
   // Handle layout changes - focus on new search view detection
   private handleLayoutChanges = async () => {
-    // Clear location cache when layout changes
-    this.clearLocationCache();
-    
+    // Defer layout change processing to avoid blocking
+    this.scheduleDomOperation(() => {
+      // Only clear cache if needed for major changes
+      this.clearLocationCache();
+    });
+
     // Early exit if redirection is not enabled
     if (!this.settings.openBookmarksInMainArea) {
       return;
     }
-    
+
     const leaves = this.app.workspace.getLeavesOfType("search");
-    
+
     // Early exit if no search views exist
     if (leaves.length === 0) {
       return;
     }
-    
+
+    // Pre-calculate locations for all leaves to avoid repeated DOM traversal
+    const leafLocations = new Map<WorkspaceLeaf, boolean>();
+    leaves.forEach(leaf => {
+      leafLocations.set(leaf, this.isInMainArea(leaf));
+    });
+
     // Only process new search leaves during layout changes
     for (const leaf of leaves) {
       if (!this.processedLeaves.has(leaf)) {
-        await this.processNewSearchLeaf(leaf);
+        await this.processNewSearchLeaf(leaf, leafLocations.get(leaf));
       }
     }
   };
@@ -314,7 +325,7 @@ export default class SearchPinnedRememberPlugin extends Plugin {
   };
 
   // Process a newly detected search leaf
-  private async processNewSearchLeaf(leaf: WorkspaceLeaf) {
+  private async processNewSearchLeaf(leaf: WorkspaceLeaf, isMainArea?: boolean) {
     // Mark as processed immediately to avoid reprocessing
     this.processedLeaves.add(leaf);
 
@@ -327,7 +338,8 @@ export default class SearchPinnedRememberPlugin extends Plugin {
 
       // 🔧 FIX: If clearSidebarSearchOnStartup is enabled and this is a sidebar search,
       // don't apply settings or start monitoring - it will be cleaned up shortly
-      if (this.settings.clearSidebarSearchOnStartup && !this.isInMainArea(leaf)) {
+      const leafIsInMainArea = isMainArea !== undefined ? isMainArea : this.isInMainArea(leaf);
+      if (this.settings.clearSidebarSearchOnStartup && !leafIsInMainArea) {
         this.debugLog('🧹 Skipping sidebar search processing - will be cleaned up on startup');
         return;
       }
@@ -335,7 +347,8 @@ export default class SearchPinnedRememberPlugin extends Plugin {
     } else {
       // Normal redirection logic for real bookmark clicks (after grace period)
       // 🎯 Check if bookmark redirection is enabled AND this is a sidebar search
-      if (this.settings.openBookmarksInMainArea && !this.isInMainArea(leaf, true)) {
+      const leafIsInMainArea = isMainArea !== undefined ? isMainArea : this.isInMainArea(leaf, true);
+      if (this.settings.openBookmarksInMainArea && !leafIsInMainArea) {
         this.debugLog('📍 New sidebar search detected via event system - redirecting to main area');
 
         // Use centralized redirection trigger with duplicate prevention
@@ -343,7 +356,7 @@ export default class SearchPinnedRememberPlugin extends Plugin {
 
         // Don't apply settings or start monitoring - the leaf will be closed soon
         return;
-      } else if (!this.isInMainArea(leaf, false)) {
+      } else if (!leafIsInMainArea) {
         this.debugLog('📍 Sidebar search detected but redirection disabled by setting');
       }
     }
@@ -522,8 +535,8 @@ export default class SearchPinnedRememberPlugin extends Plugin {
         this.debugLog('🎯 Search command detected:', actualCommandId);
         
         // Clear all processed status for sidebar search views to allow reprocessing
-        const currentSidebarSearchViews = this.app.workspace.getLeavesOfType("search")
-          .filter(leaf => !this.isInMainArea(leaf));
+        const searchLeaves = this.app.workspace.getLeavesOfType("search");
+        const currentSidebarSearchViews = searchLeaves.filter(leaf => !this.isInMainArea(leaf));
         
         currentSidebarSearchViews.forEach(leaf => {
           if (this.processedLeaves.has(leaf)) {
@@ -549,9 +562,21 @@ export default class SearchPinnedRememberPlugin extends Plugin {
 
     // 🚀 OPTIMIZATION: Batch process all leaves in one pass
     const sidebarLeaves: WorkspaceLeaf[] = [];
+    const allLeaves: WorkspaceLeaf[] = [];
+
     this.app.workspace.iterateAllLeaves(leaf => {
-      // Only monitor leaves in sidebar areas
-      if (!this.isInMainArea(leaf)) {
+      allLeaves.push(leaf);
+    });
+
+    // Pre-calculate locations for all leaves to avoid repeated DOM traversal
+    const leafLocations = new Map<WorkspaceLeaf, boolean>();
+    allLeaves.forEach(leaf => {
+      leafLocations.set(leaf, this.isInMainArea(leaf));
+    });
+
+    // Filter based on pre-calculated results
+    allLeaves.forEach(leaf => {
+      if (!leafLocations.get(leaf)) {
         sidebarLeaves.push(leaf);
       }
     });
@@ -566,18 +591,29 @@ export default class SearchPinnedRememberPlugin extends Plugin {
     // Monitor new leaves when they are created in sidebar areas only
     this.registerEvent(
       this.app.workspace.on('layout-change', () => {
-        // Clear cache first since layout changed
+        // Use deferred cache clearing
         this.clearLocationCache();
 
         // 🚀 OPTIMIZATION: Defer leaf monitoring to avoid blocking layout changes
-        setTimeout(() => {
+        this.scheduleDomOperation(() => {
+          const newLeaves: WorkspaceLeaf[] = [];
           this.app.workspace.iterateAllLeaves(leaf => {
-            // Only monitor new sidebar leaves that aren't already monitored
-            if (!this.isInMainArea(leaf) && !(leaf as any).__viewStateMonitored) {
+            newLeaves.push(leaf);
+          });
+
+          // Pre-calculate locations for all new leaves
+          const leafLocations = new Map<WorkspaceLeaf, boolean>();
+          newLeaves.forEach(leaf => {
+            leafLocations.set(leaf, this.isInMainArea(leaf));
+          });
+
+          // Monitor only new sidebar leaves
+          newLeaves.forEach(leaf => {
+            if (!leafLocations.get(leaf) && !(leaf as any).__viewStateMonitored) {
               this.monitorLeafViewState(leaf);
             }
           });
-        }, 0);
+        });
       })
     );
   }
@@ -633,7 +669,14 @@ export default class SearchPinnedRememberPlugin extends Plugin {
   private detectDirectSearchViewCreation() {
     try {
       const allSearchLeaves = this.app.workspace.getLeavesOfType("search");
-      const sidebarSearchLeaves = allSearchLeaves.filter(leaf => !this.isInMainArea(leaf));
+
+      // Pre-calculate locations to avoid repeated DOM traversal
+      const leafLocations = new Map<WorkspaceLeaf, boolean>();
+      allSearchLeaves.forEach(leaf => {
+        leafLocations.set(leaf, this.isInMainArea(leaf));
+      });
+
+      const sidebarSearchLeaves = allSearchLeaves.filter(leaf => !leafLocations.get(leaf));
       
       for (const leaf of sidebarSearchLeaves) {
         // Check if this leaf is newly created and not yet processed
@@ -682,21 +725,27 @@ export default class SearchPinnedRememberPlugin extends Plugin {
   // Handle post-processing after a search command is executed
   private handleSearchCommandExecution() {
     console.log('🔄 Processing search command execution');
-    
+
     try {
       // Get all search views and their locations
       const allSearchLeaves = this.app.workspace.getLeavesOfType("search");
       console.log(`📊 Total search views found: ${allSearchLeaves.length}`);
-      
+
+      // Pre-calculate locations to avoid repeated DOM traversal
+      const leafLocations = new Map<WorkspaceLeaf, boolean>();
+      allSearchLeaves.forEach(leaf => {
+        leafLocations.set(leaf, this.isInMainArea(leaf, false));
+      });
+
       // Analyze each search view
       allSearchLeaves.forEach((leaf, index) => {
-        const isMain = this.isInMainArea(leaf, false);
+        const isMain = leafLocations.get(leaf);
         const isProcessed = this.processedLeaves.has(leaf);
         console.log(`🔍 Search view ${index + 1}: ${isMain ? 'Main Area' : 'Sidebar'}, Processed: ${isProcessed}`);
       });
-      
+
       // Find sidebar search views
-      const sidebarSearchViews = allSearchLeaves.filter(leaf => !this.isInMainArea(leaf, false));
+      const sidebarSearchViews = allSearchLeaves.filter(leaf => !leafLocations.get(leaf));
       console.log(`📍 Sidebar search views: ${sidebarSearchViews.length}`);
       
       // Find unprocessed sidebar search views
@@ -719,7 +768,14 @@ export default class SearchPinnedRememberPlugin extends Plugin {
   // Find recently created sidebar search views
   private findRecentSidebarSearchView(): WorkspaceLeaf | null {
     const searchLeaves = this.app.workspace.getLeavesOfType("search");
-    const sidebarSearchLeaves = searchLeaves.filter(leaf => !this.isInMainArea(leaf));
+
+    // Pre-calculate locations to avoid repeated DOM traversal
+    const leafLocations = new Map<WorkspaceLeaf, boolean>();
+    searchLeaves.forEach(leaf => {
+      leafLocations.set(leaf, this.isInMainArea(leaf));
+    });
+
+    const sidebarSearchLeaves = searchLeaves.filter(leaf => !leafLocations.get(leaf));
     
     // Return the first unprocessed sidebar search view
     for (const leaf of sidebarSearchLeaves) {
@@ -734,13 +790,20 @@ export default class SearchPinnedRememberPlugin extends Plugin {
   // Detect sidebar search views and redirect them to main area
   private detectAndRedirectSidebarSearch() {
     if (!this.settings.openBookmarksInMainArea) return;
-    
+
     const now = Date.now();
     // Prevent rapid successive redirections (cooldown period)
     if (now - this.lastRedirectionTime < 500) return;
-    
+
     const searchLeaves = this.app.workspace.getLeavesOfType("search");
-    const sidebarSearchLeaves = searchLeaves.filter(leaf => !this.isInMainArea(leaf));
+
+    // Pre-calculate locations to avoid repeated DOM traversal
+    const leafLocations = new Map<WorkspaceLeaf, boolean>();
+    searchLeaves.forEach(leaf => {
+      leafLocations.set(leaf, this.isInMainArea(leaf));
+    });
+
+    const sidebarSearchLeaves = searchLeaves.filter(leaf => !leafLocations.get(leaf));
     
     for (const leaf of sidebarSearchLeaves) {
       // Skip if we've already processed this leaf
@@ -765,16 +828,18 @@ export default class SearchPinnedRememberPlugin extends Plugin {
       
       console.log('🚀 Fast redirection: Optimizing sidebar to main area transition');
       
-      // 🎯 IMMEDIATELY hide the sidebar search to prevent visual flicker
-      try {
-        const container = leaf.view?.containerEl;
-        if (container) {
-          container.style.display = 'none';
-          console.log('👻 Sidebar search view hidden instantly');
+      // 🎯 Hide the sidebar search to prevent visual flicker - defer to avoid forced reflow
+      this.scheduleDomOperation(() => {
+        try {
+          const container = leaf.view?.containerEl;
+          if (container) {
+            container.style.display = 'none';
+            console.log('👻 Sidebar search view hidden via batched operation');
+          }
+        } catch (error) {
+          console.warn('Could not hide sidebar search view:', error);
         }
-      } catch (error) {
-        console.warn('Could not hide sidebar search view:', error);
-      }
+      });
       
       // Get the search state quickly
       const viewState = leaf.getViewState();
@@ -832,13 +897,13 @@ export default class SearchPinnedRememberPlugin extends Plugin {
       // Reveal and focus the new tab
       this.app.workspace.revealLeaf(leaf);
       
-      // Focus the search input
-      setTimeout(() => {
+      // Focus the search input - defer to avoid forced reflow
+      this.scheduleDomOperation(() => {
         try {
           const input = leaf.view?.containerEl?.querySelector<HTMLInputElement>("input[type='search'], .workspace-leaf-content input");
           input?.focus();
         } catch {}
-      }, 50);
+      });
       
       console.log('✅ Search tab created in main area');
       
@@ -863,13 +928,15 @@ export default class SearchPinnedRememberPlugin extends Plugin {
 
   // Check if a leaf is in the main area with caching for better performance
   private isInMainArea(leaf: WorkspaceLeaf, enableVerboseLogging = false): boolean {
-    // Check cache first
-    const cachedResult = this.leafLocationCache.get(leaf);
-    if (cachedResult !== undefined) {
+    // Check cache first with expiration
+    const cached = this.leafLocationCache.get(leaf);
+    const now = Date.now();
+
+    if (cached && (now - cached.timestamp) < this.cacheValidityDuration) {
       if (enableVerboseLogging) {
-        console.log(`${cachedResult ? '🏠' : '📍'} Leaf location (cached): ${cachedResult ? 'Main Area' : 'Sidebar'}`);
+        console.log(`${cached.result ? '🏠' : '📍'} Leaf location (cached): ${cached.result ? 'Main Area' : 'Sidebar'}`);
       }
-      return cachedResult;
+      return cached.result;
     }
     
     // Check if the leaf is in the root split (main area)
@@ -881,9 +948,9 @@ export default class SearchPinnedRememberPlugin extends Plugin {
       const parentType = (parent as any).type || parent.constructor.name || 'unknown';
       parentChain.push(parentType);
       if (parent === this.app.workspace.rootSplit) {
-        // Cache the result
-        this.leafLocationCache.set(leaf, true);
-        
+        // Cache the result with timestamp
+        this.leafLocationCache.set(leaf, { result: true, timestamp: now });
+
         if (enableVerboseLogging) {
           console.log(`🏠 Leaf is in main area (depth: ${depth}, chain: ${parentChain.join(' -> ')})`);
         }
@@ -892,19 +959,52 @@ export default class SearchPinnedRememberPlugin extends Plugin {
       parent = parent.parent;
       depth++;
     }
-    
-    // Cache the result
-    this.leafLocationCache.set(leaf, false);
-    
+
+    // Cache the result with timestamp
+    this.leafLocationCache.set(leaf, { result: false, timestamp: now });
+
     if (enableVerboseLogging) {
       console.log(`📍 Leaf is in sidebar (depth: ${depth}, chain: ${parentChain.join(' -> ')})`);
     }
     return false;
   }
 
-  // Clear location cache when layout changes
+  // Batch DOM operations to prevent forced reflow
+  private scheduleDomOperation(operation: () => void) {
+    this.pendingDomOperations.push(operation);
+
+    if (!this.domOperationScheduled) {
+      this.domOperationScheduled = true;
+      requestAnimationFrame(() => {
+        const operations = this.pendingDomOperations.splice(0);
+        this.domOperationScheduled = false;
+        operations.forEach(op => {
+          try {
+            op();
+          } catch (error) {
+            console.error('Error in batched DOM operation:', error);
+          }
+        });
+      });
+    }
+  }
+
+  // Selective cache invalidation instead of clearing all
+  private invalidateLeafLocationCache(leaf?: WorkspaceLeaf) {
+    if (leaf) {
+      this.leafLocationCache.delete(leaf);
+    } else {
+      // Only clear cache if absolutely necessary (major layout changes)
+      this.leafLocationCache = new WeakMap();
+    }
+  }
+
+  // Clear location cache when layout changes (now less aggressive)
   private clearLocationCache() {
-    this.leafLocationCache = new WeakMap();
+    // Don't clear immediately - schedule for next frame to batch with other operations
+    this.scheduleDomOperation(() => {
+      this.leafLocationCache = new WeakMap();
+    });
   }
 
   // Open search in main area with specific query and state
@@ -977,7 +1077,14 @@ export default class SearchPinnedRememberPlugin extends Plugin {
   private performStartupCleanup() {
     try {
       const searchLeaves = this.app.workspace.getLeavesOfType("search");
-      const sidebarSearchLeaves = searchLeaves.filter(leaf => !this.isInMainArea(leaf));
+
+      // Pre-calculate locations to avoid repeated DOM traversal
+      const leafLocations = new Map<WorkspaceLeaf, boolean>();
+      searchLeaves.forEach(leaf => {
+        leafLocations.set(leaf, this.isInMainArea(leaf));
+      });
+
+      const sidebarSearchLeaves = searchLeaves.filter(leaf => !leafLocations.get(leaf));
       
       console.log(`🔍 Startup cleanup: Found ${searchLeaves.length} total search views, ${sidebarSearchLeaves.length} in sidebar`);
       
